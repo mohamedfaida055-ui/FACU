@@ -1,0 +1,7 @@
+{
+  "name": "LensLogic - AI Vision Extractor",
+  "description": "Instant OCR and data extraction tool that converts photos of documents into structured data for Google Sheets.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
