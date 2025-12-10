@@ -5,38 +5,48 @@ const BASE_URL = 'https://sheets.googleapis.com/v4/spreadsheets';
 export const exportToGoogleSheet = async (
   spreadsheetId: string, 
   accessToken: string, 
-  data: ExtractedData
+  data: ExtractedData,
+  sheetName: string
 ): Promise<void> => {
   if (!spreadsheetId || !accessToken) {
     throw new Error("Missing Spreadsheet ID or Access Token");
   }
 
-  // --- 0. Fetch Spreadsheet Metadata to get correct Sheet Name ---
-  // We cannot assume "Sheet1". If the user renamed it, the API will fail.
-  const metaResponse = await fetch(`${BASE_URL}/${spreadsheetId}`, {
-    method: 'GET',
-    headers: {
-      'Authorization': `Bearer ${accessToken}`,
-      'Content-Type': 'application/json',
-    }
+  // --- 0. Find or Create Sheet ---
+  const getSpreadsheetUrl = `${BASE_URL}/${spreadsheetId}?fields=sheets.properties`;
+  const metaResponse = await fetch(getSpreadsheetUrl, {
+    headers: { 'Authorization': `Bearer ${accessToken}` },
   });
 
   if (!metaResponse.ok) {
-     const err = await metaResponse.json();
-     throw new Error(err.error?.message || "Failed to access spreadsheet. Check ID and permissions.");
+    const err = await metaResponse.json();
+    throw new Error(err.error?.message || "Failed to access spreadsheet. Check ID and permissions.");
   }
 
   const metaData = await metaResponse.json();
-  const sheetTitle = metaData.sheets?.[0]?.properties?.title || 'Sheet1';
+  const existingSheet = metaData.sheets.find((s: any) => s.properties.title === sheetName);
 
-  // Helper: Format sheet name for A1 notation (escape quotes, wrap in quotes if spaces needed)
+  if (!existingSheet) {
+    // Sheet doesn't exist, create it
+    await fetch(`${BASE_URL}/${spreadsheetId}:batchUpdate`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        requests: [{ addSheet: { properties: { title: sheetName } } }],
+      }),
+    });
+  }
+
+  // Helper to format sheet name for A1 notation (escape quotes, wrap in quotes if spaces needed)
   const formatSheetName = (name: string) => {
-    // If name is simple alphanumeric, return as is. Otherwise quote it.
-    if (/^[a-zA-Z0-9_]+$/.test(name)) return name; 
+    if (/^[a-zA-Z0-9_]+$/.test(name)) return name;
     return `'${name.replace(/'/g, "''")}'`;
   };
-  
-  const a1SheetName = formatSheetName(sheetTitle);
+
+  const a1SheetName = formatSheetName(sheetName);
 
   // --- 1. Prepare Data for Export ---
   const globalHeaders = data.fields.map(f => f.label);

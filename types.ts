@@ -18,6 +18,15 @@ export interface ExtractedData {
   tables: Table[];
 }
 
+export interface ProcessedResult {
+  id: string;
+  name: string; // Add name for the tab
+  image: string;
+  data: ExtractedData;
+  status: AppStatus;
+  errorMessage: string | null;
+}
+
 export enum AppStatus {
   IDLE = 'IDLE',
   ANALYZING = 'ANALYZING',

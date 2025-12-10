@@ -12,52 +12,69 @@ import {
 } from 'lucide-react';
 import ImageUploader from './components/ImageUploader';
 import DataEditor from './components/DataEditor';
-import { ExtractedData, AppStatus, SheetConfig } from './types';
+import ResultTabs from './components/ResultTabs';
+import { ExtractedData, AppStatus, SheetConfig, ProcessedResult } from './types';
 import { extractDataFromImage } from './services/geminiService';
 import { exportToGoogleSheet } from './services/googleSheetsService';
 
 const App: React.FC = () => {
-  const [image, setImage] = useState<string | null>(null);
-  const [data, setData] = useState<ExtractedData>({ fields: [], tables: [] });
-  const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
-  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [results, setResults] = useState<ProcessedResult[]>([]);
+  const [activeResultId, setActiveResultId] = useState<string | null>(null);
   
   const [showSettings, setShowSettings] = useState(false);
   
-  // Configuration now uses Client ID for better UX
   const [sheetConfig, setSheetConfig] = useState<SheetConfig>({
     spreadsheetId: '',
     clientId: ''
   });
   
-  // Store the temporary access token in memory after login
   const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
 
+  // Find the currently active result from the results array
+  const activeResult = results.find(r => r.id === activeResultId);
+
+  // Helper to update a specific result in the state
+  const updateResult = (id: string, updates: Partial<ProcessedResult>) => {
+    setResults(prev => prev.map(r => (r.id === id ? { ...r, ...updates } : r)));
+  };
+
   const handleImageSelect = async (base64: string) => {
-    setImage(base64);
-    setStatus(AppStatus.ANALYZING);
-    setErrorMessage(null);
+    const newResultId = `result-${Date.now()}`;
+    const newResult: ProcessedResult = {
+      id: newResultId,
+      name: `Result ${results.length + 1}`,
+      image: base64,
+      data: { fields: [], tables: [] },
+      status: AppStatus.ANALYZING,
+      errorMessage: null,
+    };
+
+    setResults(prev => [...prev, newResult]);
+    setActiveResultId(newResultId);
 
     try {
-      const result = await extractDataFromImage(base64);
-      setData(result);
-      setStatus(AppStatus.SUCCESS);
-    } catch (error: any) {
+      const extractedData = await extractDataFromImage(base64);
+      updateResult(newResultId, { data: extractedData, status: AppStatus.SUCCESS });
+    } catch (error: any) { 
       console.error(error);
-      setStatus(AppStatus.ERROR);
-      setErrorMessage(error.message || "Failed to extract data.");
+      updateResult(newResultId, {
+        status: AppStatus.ERROR,
+        errorMessage: error.message || "Failed to extract data.",
+      });
     }
   };
 
   const copyToClipboard = () => {
+    if (!activeResult?.data) return;
+
     let text = "--- DETAILS ---\n";
-    data.fields.forEach(f => {
+    activeResult.data.fields.forEach(f => {
       text += `${f.label}: ${f.value}\n`;
     });
 
-    if (data.tables.length > 0) {
+    if (activeResult.data.tables.length > 0) {
       text += "\n--- TABLES ---\n";
-      data.tables.forEach(t => {
+      activeResult.data.tables.forEach(t => {
         text += `[${t.name}]\n`;
         text += t.headers.join('\t') + '\n';
         t.rows.forEach(row => {
@@ -68,10 +85,27 @@ const App: React.FC = () => {
     }
 
     navigator.clipboard.writeText(text);
-    alert("Data copied to clipboard!");
+    alert("Data for active tab copied to clipboard!");
   };
 
-  // Trigger Google Login Flow
+  const handleCloseTab = (id: string) => {
+    const remainingResults = results.filter(r => r.id !== id);
+
+    if (activeResultId === id) {
+      if (remainingResults.length > 0) {
+        setActiveResultId(remainingResults[remainingResults.length - 1].id);
+      } else {
+        setActiveResultId(null);
+      }
+    }
+
+    setResults(remainingResults);
+  };
+
+  const handleRenameTab = (id: string, newName: string) => {
+    updateResult(id, { name: newName });
+  };
+
   const handleGoogleLogin = () => {
     if (!sheetConfig.clientId) {
       alert("Please enter your Google Client ID in settings first.");
@@ -90,7 +124,6 @@ const App: React.FC = () => {
       callback: (tokenResponse: any) => {
         if (tokenResponse && tokenResponse.access_token) {
           setGoogleAccessToken(tokenResponse.access_token);
-          // If we were waiting to export, we could trigger it here, but for now just show success
           alert("Connected to Google successfully! You can now export.");
         }
       },
@@ -106,7 +139,6 @@ const App: React.FC = () => {
       return;
     }
 
-    // If no token, try to login first
     if (!googleAccessToken) {
       const confirmLogin = window.confirm("You need to connect to Google Sheets first. Connect now?");
       if (confirmLogin) {
@@ -115,17 +147,22 @@ const App: React.FC = () => {
       return;
     }
 
-    setStatus(AppStatus.EXPORTING);
+    if (!activeResult) {
+      alert("No active document to export.");
+      return;
+    }
+
+    updateResult(activeResult.id, { status: AppStatus.EXPORTING });
     try {
-      await exportToGoogleSheet(sheetConfig.spreadsheetId, googleAccessToken, data);
-      alert("Success! Data appended to Google Sheet.");
-      setStatus(AppStatus.SUCCESS);
+      const sheetName = activeResult.name;
+      await exportToGoogleSheet(sheetConfig.spreadsheetId, googleAccessToken, activeResult.data, sheetName);
+      alert(`Success! Data exported to sheet: ${sheetName}`);
+      updateResult(activeResult.id, { status: AppStatus.SUCCESS });
     } catch (error: any) {
       console.error(error);
       alert(`Export Failed: ${error.message}`);
-      setStatus(AppStatus.SUCCESS); 
+      updateResult(activeResult.id, { status: AppStatus.SUCCESS });
       
-      // If 401, token might be expired
       if (error.message.includes("401") || error.message.includes("unauthorized")) {
         setGoogleAccessToken(null);
         alert("Session expired. Please connect again.");
@@ -134,15 +171,18 @@ const App: React.FC = () => {
   };
 
   const downloadCSV = () => {
-    let headers: string[] = data.fields.map(f => f.label);
-    let rows: string[][] = [data.fields.map(f => String(f.value))];
+    if (!activeResult?.data) return;
 
-    if (data.tables.length > 0) {
-      const mainTable = data.tables[0];
+    const resultData = activeResult.data;
+    let headers: string[] = resultData.fields.map(f => f.label);
+    let rows: string[][] = [resultData.fields.map(f => String(f.value))];
+
+    if (resultData.tables.length > 0) {
+      const mainTable = resultData.tables[0];
       headers = [...headers, ...mainTable.headers];
       rows = [];
       
-      const globalVals = data.fields.map(f => String(f.value));
+      const globalVals = resultData.fields.map(f => String(f.value));
       mainTable.rows.forEach(r => {
         rows.push([...globalVals, ...r.values]);
       });
@@ -155,18 +195,18 @@ const App: React.FC = () => {
     const encodedUri = encodeURI(csvContent);
     const link = document.createElement("a");
     link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "extracted_data.csv");
+    const fileName = `extracted_data_${results.findIndex(r => r.id === activeResultId) + 1}.csv`;
+    link.setAttribute("download", fileName);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
-  const hasData = (data.fields && data.fields.length > 0) || (data.tables && data.tables.length > 0);
+  const hasData = (activeResult?.data?.fields?.length ?? 0) > 0 || (activeResult?.data?.tables?.length ?? 0) > 0;
 
   return (
     <div className="min-h-screen flex flex-col md:flex-row bg-slate-50 text-slate-900 font-sans">
       
-      {/* Sidebar / Settings Panel */}
       {showSettings && (
         <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-6 animate-in fade-in zoom-in duration-200">
@@ -224,10 +264,8 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {/* Main Content Area */}
       <main className="flex-1 flex flex-col max-w-7xl mx-auto w-full p-4 md:p-6 lg:p-8 gap-6">
         
-        {/* Header */}
         <header className="flex justify-between items-center">
           <div>
             <h1 className="text-2xl md:text-3xl font-extrabold tracking-tight text-slate-900 flex items-center gap-2">
@@ -258,28 +296,25 @@ const App: React.FC = () => {
           </button>
         </header>
 
-        {/* Workspace */}
         <div className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-6 min-h-0">
           
-          {/* Left Column: Input & Preview */}
           <section className="flex flex-col gap-4">
             <div className="bg-white p-1 rounded-2xl shadow-sm border border-slate-100">
                <ImageUploader 
                  onImageSelected={handleImageSelect} 
-                 isLoading={status === AppStatus.ANALYZING} 
+                 isLoading={results.some(r => r.status === AppStatus.ANALYZING)} 
                />
             </div>
 
-            {/* Image Preview Panel */}
-            {image && (
+            {activeResult && (
               <div className="relative flex-1 bg-slate-900 rounded-xl overflow-hidden shadow-inner flex items-center justify-center min-h-[300px]">
                 <img 
-                  src={image} 
+                  src={activeResult.image} 
                   alt="Preview" 
                   className="max-w-full max-h-[500px] object-contain opacity-90"
                 />
                 
-                {status === AppStatus.ANALYZING && (
+                {activeResult.status === AppStatus.ANALYZING && (
                   <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center backdrop-blur-sm z-10">
                     <Loader2 className="w-10 h-10 text-brand-400 animate-spin mb-4" />
                     <p className="text-white font-medium text-lg animate-pulse">Analyzing document...</p>
@@ -287,13 +322,13 @@ const App: React.FC = () => {
                   </div>
                 )}
                 
-                {status === AppStatus.ERROR && (
+                {activeResult.status === AppStatus.ERROR && (
                    <div className="absolute inset-0 bg-black/60 flex flex-col items-center justify-center backdrop-blur-sm z-10 p-6 text-center">
                     <AlertCircle className="w-12 h-12 text-red-500 mb-4" />
                     <p className="text-white font-bold text-lg">Extraction Failed</p>
-                    <p className="text-red-200 text-sm mt-2">{errorMessage}</p>
+                    <p className="text-red-200 text-sm mt-2">{activeResult.errorMessage}</p>
                     <button 
-                      onClick={() => setStatus(AppStatus.IDLE)} 
+                      onClick={() => updateResult(activeResult.id, { status: AppStatus.IDLE })} 
                       className="mt-4 px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-lg text-sm"
                     >
                       Try Again
@@ -304,11 +339,24 @@ const App: React.FC = () => {
             )}
           </section>
 
-          {/* Right Column: Data & Actions */}
           <section className="flex flex-col gap-4 min-h-[400px]">
-            <DataEditor data={data} onChange={setData} />
+            <ResultTabs 
+              results={results}
+              activeResultId={activeResultId}
+              onSelectTab={setActiveResultId}
+              onCloseTab={handleCloseTab}
+              onRenameTab={handleRenameTab}
+            />
+            <DataEditor 
+              key={activeResultId}
+              data={activeResult?.data ?? { fields: [], tables: [] }}
+              onChange={(newData) => {
+                if (activeResultId) {
+                  updateResult(activeResultId, { data: newData });
+                }
+              }}
+            />
             
-            {/* Action Bar */}
             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                <button 
                  onClick={copyToClipboard}
@@ -339,10 +387,10 @@ const App: React.FC = () => {
                ) : (
                  <button 
                    onClick={handleExportToSheets}
-                   disabled={!hasData || status === AppStatus.EXPORTING}
+                   disabled={!hasData || activeResult?.status === AppStatus.EXPORTING}
                    className="col-span-2 md:col-span-1 flex items-center justify-center gap-2 py-3 px-4 bg-green-600 text-white font-semibold rounded-xl hover:bg-green-700 shadow-md hover:shadow-lg transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                  >
-                   {status === AppStatus.EXPORTING ? (
+                   {activeResult?.status === AppStatus.EXPORTING ? (
                      <Loader2 size={18} className="animate-spin" />
                    ) : (
                      <FileSpreadsheet size={18} />
@@ -352,8 +400,7 @@ const App: React.FC = () => {
                )}
             </div>
             
-            {/* Status Indicator for successful actions */}
-            {status === AppStatus.SUCCESS && hasData && (
+            {activeResult?.status === AppStatus.SUCCESS && hasData && (
               <div className="bg-green-50 text-green-700 border border-green-200 px-4 py-3 rounded-lg flex items-center gap-3 animate-in slide-in-from-bottom-2 duration-500">
                 <CheckCircle size={20} className="shrink-0" />
                 <p className="text-sm font-medium">Ready! Data & Tables extracted successfully.</p>
