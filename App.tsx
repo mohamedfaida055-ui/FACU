@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Copy, 
   FileSpreadsheet, 
@@ -23,12 +23,26 @@ const App: React.FC = () => {
   
   const [showSettings, setShowSettings] = useState(false);
   
-  const [sheetConfig, setSheetConfig] = useState<SheetConfig>({
-    spreadsheetId: '',
-    clientId: ''
+  const [sheetConfig, setSheetConfig] = useState<SheetConfig>(() => {
+    try {
+      const savedConfig = localStorage.getItem('sheetConfig');
+      if (savedConfig) {
+        const parsed = JSON.parse(savedConfig);
+        if (typeof parsed.spreadsheetId === 'string' && typeof parsed.clientId === 'string') {
+          return parsed;
+        }
+      }
+    } catch (error) {
+      console.error("Failed to parse sheetConfig from localStorage", error);
+    }
+    return { spreadsheetId: '', clientId: '' };
   });
   
   const [googleAccessToken, setGoogleAccessToken] = useState<string | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem('sheetConfig', JSON.stringify(sheetConfig));
+  }, [sheetConfig]);
 
   // Find the currently active result from the results array
   const activeResult = results.find(r => r.id === activeResultId);
